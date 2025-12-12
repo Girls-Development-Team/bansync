@@ -101,18 +101,17 @@ async function registerCommands() {
   const rest = new REST().setToken(TOKEN);
   
   try {
-    console.log('🔄 Started refreshing application (/) commands.');
+    console.log('🔄 Started refreshing global application (/) commands.');
+    console.log('⏳ Note: Global commands can take up to 1 hour to sync across all servers.');
     
-    // Register commands for each configured guild
-    for (const server of serversConfig.servers) {
-      await rest.put(
-        Routes.applicationGuildCommands(client.user!.id, server.id),
-        { body: commands }
-      );
-      console.log(`  ✅ Registered commands for ${server.name}`);
-    }
+    // Register commands globally instead of per-guild
+    await rest.put(
+      Routes.applicationCommands(client.user!.id),
+      { body: commands }
+    );
     
-    console.log('✅ Successfully reloaded application (/) commands.');
+    console.log('✅ Successfully registered global commands.');
+    console.log('   Commands will be available in all servers within an hour.');
   } catch (error) {
     console.error('❌ Error registering commands:', error);
   }
