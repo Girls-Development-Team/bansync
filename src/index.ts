@@ -79,7 +79,18 @@ client.on('guildBanAdd', async (ban) => {
   }
 
   const sourceServerName = serverMap.get(sourceGuild.id)!;
+  
+  // Fetch the ban to get the reason
+  let banReason = 'No reason provided';
+  try {
+    const fetchedBan = await sourceGuild.bans.fetch(bannedUser.id);
+    banReason = fetchedBan.reason || 'No reason provided';
+  } catch (error) {
+    console.log(`⚠️  Could not fetch ban reason: ${error}`);
+  }
+  
   console.log(`\n🔨 Ban detected: ${bannedUser.tag} (${bannedUser.id}) in ${sourceServerName}`);
+  console.log(`   Reason: ${banReason}`);
 
   const results: BanResult[] = [];
 
@@ -138,9 +149,10 @@ client.on('guildBanAdd', async (ban) => {
         continue;
       }
 
-      // Ban the user
+      // Ban the user with [BanSync] prefix
+      const syncReason = `[BanSync] Banned in ${sourceServerName} | Reason: ${banReason}`;
       await guild.members.ban(bannedUser.id, {
-        reason: `Ban sync from ${sourceServerName}`,
+        reason: syncReason,
       });
 
       results.push({
@@ -173,13 +185,14 @@ client.on('guildBanAdd', async (ban) => {
   }
 
   // Try to send a message to the source guild's system channel
-  await sendBanReport(sourceGuild, bannedUser, results);
+  await sendBanReport(sourceGuild, bannedUser, results, banReason);
 });
 
 async function sendBanReport(
   sourceGuild: Guild,
   bannedUser: { tag: string; id: string },
-  results: BanResult[]
+  results: BanResult[],
+  banReason: string
 ) {
   try {
     const systemChannel = sourceGuild.systemChannel;
@@ -206,6 +219,7 @@ async function sendBanReport(
       .setDescription(`User **${bannedUser.tag}** has been banned across servers.`)
       .addFields(
         { name: 'User', value: `<@${bannedUser.id}> (\`${bannedUser.id}\`)`, inline: false },
+        { name: 'Reason', value: banReason, inline: false },
         { name: 'Servers', value: resultText || 'None', inline: false },
         {
           name: 'Summary',
