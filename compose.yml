@@ -1,4 +1,4 @@
-ervices:
+services:
   bansync-bot:
     build: .
     container_name: bansync-bot
