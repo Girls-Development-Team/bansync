@@ -1,4 +1,15 @@
-import { Client, GatewayIntentBits, Guild, EmbedBuilder, Colors } from 'discord.js';
+import { 
+  Client, 
+  GatewayIntentBits, 
+  Guild, 
+  EmbedBuilder, 
+  Colors,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  ChatInputCommandInteraction,
+  PermissionFlagsBits
+} from 'discord.js';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -31,6 +42,14 @@ interface BanResult {
   success: boolean;
   alreadyBanned: boolean;
   error?: string;
+}
+
+interface SyncStats {
+  totalBans: number;
+  newBans: number;
+  alreadyBanned: number;
+  errors: number;
+  details: Map<string, { user: string; results: BanResult[] }>;
 }
 
 // Load server configuration
@@ -66,7 +85,40 @@ const serverMap = new Map<string, string>(
   serversConfig.servers.map(s => [s.id, s.name])
 );
 
-client.once('ready', () => {
+// Define slash commands
+const commands = [
+  new SlashCommandBuilder()
+    .setName('sync')
+    .setDescription('Sync all bans across configured servers')
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
+    .setDMPermission(false),
+].map(command => command.toJSON());
+
+// Register slash commands
+async function registerCommands() {
+  if (!TOKEN) return; // Should never happen due to early exit, but satisfies TypeScript
+  
+  const rest = new REST().setToken(TOKEN);
+  
+  try {
+    console.log('🔄 Started refreshing application (/) commands.');
+    
+    // Register commands for each configured guild
+    for (const server of serversConfig.servers) {
+      await rest.put(
+        Routes.applicationGuildCommands(client.user!.id, server.id),
+        { body: commands }
+      );
+      console.log(`  ✅ Registered commands for ${server.name}`);
+    }
+    
+    console.log('✅ Successfully reloaded application (/) commands.');
+  } catch (error) {
+    console.error('❌ Error registering commands:', error);
+  }
+}
+
+client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user?.tag}`);
   console.log(`📊 Configured servers:`);
   
@@ -78,7 +130,214 @@ client.once('ready', () => {
       console.log(`  ❌ ${server.name} (${server.id}) - Bot not in this server!`);
     }
   }
+  
+  // Register slash commands
+  await registerCommands();
 });
+
+// Handle slash commands
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  
+  if (interaction.commandName === 'sync') {
+    await handleSyncCommand(interaction);
+  }
+});
+
+async function handleSyncCommand(interaction: ChatInputCommandInteraction) {
+  // Check if user has ban permissions
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.BanMembers)) {
+    await interaction.reply({
+      content: '❌ You need Ban Members permission to use this command.',
+      ephemeral: true,
+    });
+    return;
+  }
+  
+  await interaction.deferReply();
+  
+  try {
+    console.log(`\n🔄 Ban sync initiated by ${interaction.user.tag} in ${interaction.guild?.name}`);
+    
+    const stats: SyncStats = {
+      totalBans: 0,
+      newBans: 0,
+      alreadyBanned: 0,
+      errors: 0,
+      details: new Map(),
+    };
+    
+    // Collect all bans from all servers
+    const allBans = new Map<string, { userId: string; userTag: string; sourceServerId: string; sourceServerName: string; reason: string }>();
+    
+    for (const configServer of serversConfig.servers) {
+      const guild = client.guilds.cache.get(configServer.id);
+      if (!guild) continue;
+      
+      try {
+        const bans = await guild.bans.fetch();
+        console.log(`📋 Found ${bans.size} bans in ${configServer.name}`);
+        
+        for (const [userId, ban] of bans) {
+          // Skip bans that were already synced
+          if (ban.reason?.startsWith('[BanSync]')) continue;
+          
+          // Only add if we haven't seen this user yet, or if this ban has a better reason
+          if (!allBans.has(userId) || !allBans.get(userId)!.reason) {
+            allBans.set(userId, {
+              userId: ban.user.id,
+              userTag: ban.user.tag,
+              sourceServerId: guild.id,
+              sourceServerName: configServer.name,
+              reason: ban.reason || 'No reason provided',
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`❌ Failed to fetch bans from ${configServer.name}:`, error);
+      }
+    }
+    
+    console.log(`\n📊 Total unique bans to sync: ${allBans.size}`);
+    
+    if (allBans.size === 0) {
+      await interaction.editReply({
+        content: '✅ No bans found to sync across servers.',
+      });
+      return;
+    }
+    
+    // Send initial progress message
+    await interaction.editReply({
+      content: `🔄 Syncing ${allBans.size} bans across ${serversConfig.servers.length} servers...\nThis may take a moment.`,
+    });
+    
+    // Sync each ban to all servers
+    let processedCount = 0;
+    for (const [userId, banInfo] of allBans) {
+      processedCount++;
+      const results = await syncBanToAllServers(banInfo);
+      
+      stats.totalBans++;
+      stats.details.set(userId, { user: banInfo.userTag, results });
+      
+      for (const result of results) {
+        if (result.success && !result.alreadyBanned) {
+          stats.newBans++;
+        } else if (result.alreadyBanned) {
+          stats.alreadyBanned++;
+        } else if (!result.success && result.error) {
+          stats.errors++;
+        }
+      }
+      
+      // Update progress every 5 bans
+      if (processedCount % 5 === 0) {
+        await interaction.editReply({
+          content: `🔄 Syncing bans: ${processedCount}/${allBans.size} processed...`,
+        });
+      }
+    }
+    
+    // Create summary embed
+    const embed = new EmbedBuilder()
+      .setTitle('🔄 Ban Sync Complete')
+      .setDescription(`Synchronized ${stats.totalBans} unique bans across ${serversConfig.servers.length} servers.`)
+      .addFields(
+        { name: '✅ New Bans Applied', value: stats.newBans.toString(), inline: true },
+        { name: '🔄 Already Banned', value: stats.alreadyBanned.toString(), inline: true },
+        { name: '❌ Errors', value: stats.errors.toString(), inline: true }
+      )
+      .setColor(stats.errors > 0 ? Colors.Orange : Colors.Green)
+      .setTimestamp()
+      .setFooter({ text: `Requested by ${interaction.user.tag}` });
+    
+    await interaction.editReply({
+      content: null,
+      embeds: [embed],
+    });
+    
+    console.log(`\n✅ Sync complete:`);
+    console.log(`   Total bans: ${stats.totalBans}`);
+    console.log(`   New bans: ${stats.newBans}`);
+    console.log(`   Already banned: ${stats.alreadyBanned}`);
+    console.log(`   Errors: ${stats.errors}`);
+    
+  } catch (error) {
+    console.error('❌ Error during sync:', error);
+    await interaction.editReply({
+      content: '❌ An error occurred during the sync process. Check the logs for details.',
+    });
+  }
+}
+
+async function syncBanToAllServers(banInfo: { 
+  userId: string; 
+  userTag: string; 
+  sourceServerId: string; 
+  sourceServerName: string; 
+  reason: string; 
+}): Promise<BanResult[]> {
+  const results: BanResult[] = [];
+  
+  for (const configServer of serversConfig.servers) {
+    const guild = client.guilds.cache.get(configServer.id);
+    
+    if (!guild) {
+      results.push({
+        serverId: configServer.id,
+        serverName: configServer.name,
+        success: false,
+        alreadyBanned: false,
+        error: 'Bot not in server',
+      });
+      continue;
+    }
+    
+    try {
+      // Check if already banned
+      const existingBan = await guild.bans.fetch(banInfo.userId).catch(() => null);
+      
+      if (existingBan) {
+        results.push({
+          serverId: configServer.id,
+          serverName: configServer.name,
+          success: true,
+          alreadyBanned: true,
+        });
+        continue;
+      }
+      
+      // Ban the user
+      const syncReason = `[BanSync] Originally banned in ${banInfo.sourceServerName} | Reason: ${banInfo.reason}`;
+      await guild.members.ban(banInfo.userId, {
+        reason: syncReason,
+        deleteMessageSeconds: 0, // Don't delete messages during sync
+      });
+      
+      results.push({
+        serverId: configServer.id,
+        serverName: configServer.name,
+        success: true,
+        alreadyBanned: false,
+      });
+      
+      console.log(`  ✅ Banned ${banInfo.userTag} in ${configServer.name}`);
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      results.push({
+        serverId: configServer.id,
+        serverName: configServer.name,
+        success: false,
+        alreadyBanned: false,
+        error: errorMessage,
+      });
+    }
+  }
+  
+  return results;
+}
 
 client.on('guildBanAdd', async (ban) => {
   const bannedUser = ban.user;
@@ -99,6 +358,12 @@ client.on('guildBanAdd', async (ban) => {
     banReason = fetchedBan.reason || 'No reason provided';
   } catch (error) {
     console.log(`⚠️  Could not fetch ban reason: ${error}`);
+  }
+  
+  // Skip if this is a BanSync ban to prevent loops
+  if (banReason.startsWith('[BanSync]')) {
+    console.log(`⚠️  Skipping BanSync ban to prevent loop: ${bannedUser.tag}`);
+    return;
   }
   
   console.log(`\n🔨 Ban detected: ${bannedUser.tag} (${bannedUser.id}) in ${sourceServerName}`);
@@ -134,20 +399,6 @@ client.on('guildBanAdd', async (ban) => {
     }
 
     try {
-      // Check if user is in the guild
-      const member = await guild.members.fetch(bannedUser.id).catch(() => null);
-      
-      if (!member) {
-        // User not in this guild
-        results.push({
-          serverId: configServer.id,
-          serverName: configServer.name,
-          success: false,
-          alreadyBanned: false,
-        });
-        continue;
-      }
-
       // Check if already banned
       const existingBan = await guild.bans.fetch(bannedUser.id).catch(() => null);
       
