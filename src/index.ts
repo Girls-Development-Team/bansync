@@ -189,7 +189,12 @@ client.once('ready', async () => {
     const guild = client.guilds.cache.get(server.id);
     const logStatus = server.logChannelId ? `📝 Log: ${server.logChannelId}` : '⚠️  No log channel';
     if (guild) {
-      console.log(`  ✔️  ${server.name} (${server.id}) - ${logStatus}`);
+      // Check bot permissions
+      const botMember = await guild.members.fetch(client.user!.id);
+      const hasAdminPerms = botMember.permissions.has(PermissionFlagsBits.Administrator);
+      const hasBanPerms = botMember.permissions.has(PermissionFlagsBits.BanMembers);
+      const permStatus = hasAdminPerms ? '👑 Admin' : hasBanPerms ? '✅ Can Ban' : '❌ Cannot Ban';
+      console.log(`  ✔️  ${server.name} (${server.id}) - ${permStatus} - ${logStatus}`);
     } else {
       console.log(`  ❌ ${server.name} (${server.id}) - Bot not in this server!`);
     }
@@ -257,6 +262,20 @@ async function handleUnbanCommand(interaction: ChatInputCommandInteraction) {
       }
       
       try {
+        // Check if bot has ban permissions
+        const botMember = await guild.members.fetch(client.user!.id);
+        if (!botMember.permissions.has(PermissionFlagsBits.BanMembers)) {
+          results.push({
+            serverId: configServer.id,
+            serverName: configServer.name,
+            success: false,
+            wasNotBanned: false,
+            error: 'Missing Permissions',
+          });
+          console.log(`  ❌ Missing ban permission in ${configServer.name}`);
+          continue;
+        }
+        
         // Check if user is actually banned
         const existingBan = await guild.bans.fetch(userId).catch(() => null);
         
@@ -503,6 +522,20 @@ async function syncBanToAllServers(banInfo: {
     }
     
     try {
+      // Check if bot has ban permissions
+      const botMember = await guild.members.fetch(client.user!.id);
+      if (!botMember.permissions.has(PermissionFlagsBits.BanMembers)) {
+        results.push({
+          serverId: configServer.id,
+          serverName: configServer.name,
+          success: false,
+          alreadyBanned: false,
+          error: 'Missing Permissions',
+        });
+        console.log(`  ❌ Missing ban permission in ${configServer.name}`);
+        continue;
+      }
+      
       // Check if already banned
       const existingBan = await guild.bans.fetch(banInfo.userId).catch(() => null);
       
@@ -607,6 +640,20 @@ client.on('guildBanAdd', async (ban) => {
     }
 
     try {
+      // Check if bot has ban permissions
+      const botMember = await guild.members.fetch(client.user!.id);
+      if (!botMember.permissions.has(PermissionFlagsBits.BanMembers)) {
+        results.push({
+          serverId: configServer.id,
+          serverName: configServer.name,
+          success: false,
+          alreadyBanned: false,
+          error: 'Missing Permissions',
+        });
+        console.log(`  ❌ Missing ban permission in ${configServer.name}`);
+        continue;
+      }
+      
       // Check if already banned
       const existingBan = await guild.bans.fetch(bannedUser.id).catch(() => null);
       
