@@ -464,9 +464,9 @@ async function handleSyncCommand(interaction: ChatInputCommandInteraction) {
     });
     return;
   }
-  
-  await interaction.deferReply();
-  
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
   try {
     console.log(`\n🔄 Ban sync initiated by ${interaction.user.tag} in ${interaction.guild?.name}`);
     
